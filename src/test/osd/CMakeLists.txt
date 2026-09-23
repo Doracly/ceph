@@ -45,6 +45,7 @@ install(TARGETS
   DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # scripts
+# runs a vstart cluster; core use unmeasured, so left at ctest's default weight
 add_ceph_test(safe-to-destroy.sh ${CMAKE_CURRENT_SOURCE_DIR}/safe-to-destroy.sh)
 
 # unittest_osdmap

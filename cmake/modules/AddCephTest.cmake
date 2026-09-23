@@ -2,7 +2,27 @@
 
 #adds makes target/script into a test, test to check target, sets necessary environment variables
 function(add_ceph_test test_name test_path)
-  add_test(NAME ${test_name} COMMAND ${test_path} ${ARGN}
+  # PROCESSORS tells ctest how many cores the test really occupies, so that
+  # `ctest -j` can account for tests that fan out internally instead of
+  # counting every test as one core.  For a test that sizes its own fan-out
+  # from $MAX_PARALLEL_JOBS, pass MAX_PARALLEL_JOBS instead: it declares the
+  # weight and exports the variable from the same number, so the two cannot
+  # drift apart.
+  cmake_parse_arguments(CT "" "PROCESSORS;MAX_PARALLEL_JOBS" "" ${ARGN})
+  # A job in such a test forks short-lived helper processes of its own, so one
+  # job occupies more than one core.  Measured at 1.4 cores per job: running
+  # alone under `ctest -j12`, check-generated.sh took 11.4 and readable.sh 10.8
+  # cores at 8 jobs.  Re-measure with
+  #   systemd-run --user --scope -q -p Delegate=yes ctest -R '^<test>$'
+  # dividing the scope's cpu.stat usage_usec by the elapsed time.
+  if(DEFINED CT_MAX_PARALLEL_JOBS)
+    if(DEFINED CT_PROCESSORS)
+      message(FATAL_ERROR
+        "${test_name}: pass PROCESSORS or MAX_PARALLEL_JOBS, not both")
+    endif()
+    math(EXPR CT_PROCESSORS "(${CT_MAX_PARALLEL_JOBS} * 14 + 5) / 10")
+  endif()
+  add_test(NAME ${test_name} COMMAND ${test_path} ${CT_UNPARSED_ARGUMENTS}
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMAND_EXPAND_LISTS)
   if(TARGET ${test_name})
@@ -38,6 +58,14 @@ function(add_ceph_test test_name test_path)
   endif()
   set_property(TEST ${test_name}
     PROPERTY TIMEOUT ${CEPH_TEST_TIMEOUT})
+  if(DEFINED CT_PROCESSORS)
+    set_property(TEST ${test_name}
+      PROPERTY PROCESSORS ${CT_PROCESSORS})
+  endif()
+  if(DEFINED CT_MAX_PARALLEL_JOBS)
+    set_property(TEST ${test_name} APPEND
+      PROPERTY ENVIRONMENT MAX_PARALLEL_JOBS=${CT_MAX_PARALLEL_JOBS})
+  endif()
   # Crimson seastar unittest always run with --smp N to start N threads. By default, crimson seastar unittest
   # will take cpu cores[0, N), starting one thread per core. When running many crimson seastar unittests
   # parallely, the front N cpu cores are shared, and the left cpu cores are idle. Lots of cpu cores are wasted.
