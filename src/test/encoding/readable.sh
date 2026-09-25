@@ -45,6 +45,17 @@ if [ -z "$myversion" ]; then
   echo "Failed to get version from $CEPH_DENCODER"
   exit 1
 fi
+# Both of these are the same for every object checked below, but test_object
+# runs once per (archive version, type) pair -- about 5300 times -- and each
+# call was recomputing them at the cost of a ceph-dencoder start and an
+# `ls | sort -V`.  Compute them once here instead.
+declare -A known_types
+while read -r known_type; do
+  known_types["$known_type"]=1
+done < <($CEPH_DENCODER list_types)
+
+archive_versions=$(ls "$dir/archive" | sort -V)
+
 DEBUG=0
 debug() { if [ "$DEBUG" -gt 0 ]; then echo "DEBUG: $*" >&2; fi }
 
@@ -82,11 +93,8 @@ test_object() {
     local failed=0
     local numtests=0
 
-    tmp1=$(mktemp /tmp/test_object_1-XXXXXXXXX)
-    tmp2=$(mktemp /tmp/test_object_2-XXXXXXXXX)
-
     rm -f $output_file
-    if $CEPH_DENCODER type $type 2>/dev/null; then
+    if [ -n "${known_types[$type]}" ]; then
       #echo "type $type";
       echo "        $vdir/objects/$type"
 
@@ -96,7 +104,7 @@ test_object() {
       backward_incompat=""
       backward_incompat_paths=""
       sawarversion=0
-      for iv in $(ls "$dir/archive" | sort -V); do
+      for iv in $archive_versions; do
         if [ "$iv" = "$arversion" ]; then
           sawarversion=1
         fi
@@ -147,7 +155,6 @@ test_object() {
             fi
             echo "failed=$failed" > $output_file
             echo "numtests=$numtests" >> $output_file
-            rm -f $tmp1 $tmp2
             return
           fi
         done
@@ -161,10 +168,13 @@ test_object() {
           echo "skipping backward incompat $type version $arversion, requires decoder >= $backward_incompat, current decoder is $myversion"
           echo "failed=$failed" > $output_file
           echo "numtests=$numtests" >> $output_file
-          rm -f $tmp1 $tmp2
           return
         fi
       fi
+
+      # Gather the objects that survive the incompat filters, then hand the whole
+      # list to one ceph-dencoder process below.
+      local check_list=()
 
       for f in $(ls "$vdir/objects/$type"); do
 
@@ -208,51 +218,34 @@ test_object() {
           continue
         fi;
 
-        $CEPH_DENCODER type $type import $vdir/objects/$type/$f decode dump_json > $tmp1 &
-        pid1="$!"
-        $CEPH_DENCODER type $type import $vdir/objects/$type/$f decode encode decode dump_json > $tmp2 &
-        pid2="$!"
-        #echo "\t$vdir/$type/$f"
-        if ! wait $pid1; then
-          echo "**** failed to decode type $type from archive $arversion object $f (path $vdir/objects/$type/$f) ****"
-          failed=$(($failed + 1))
-          rm -f $tmp1 $tmp2
-          continue
-        fi
-        if ! wait $pid2; then
-          echo "**** failed to decode+encode+decode type $type from archive $arversion object $f (path $vdir/objects/$type/$f) ****"
-          failed=$(($failed + 1))
-          rm -f $tmp1 $tmp2
-          continue
-        fi
-
-        # nondeterministic classes may dump
-        # nondeterministically.  compare the sorted json
-        # output.  this is a weaker test, but is better than
-        # nothing.
-        if ! $CEPH_DENCODER type $type is_deterministic; then
-          echo "  sorting json output for nondeterministic object"
-          for tmpfile in $tmp1 $tmp2; do
-            # LC_ALL=C: locale collation ties distinct lines, byte order
-            # does not, so only C gives one canonical order to compare.
-            LC_ALL=C sort $tmpfile | sed 's/,$//' > $tmpfile.new
-            mv $tmpfile.new $tmpfile
-          done
-        fi
-
-        if ! cmp $tmp1 $tmp2; then
-          echo "**** reencode of $vdir/objects/$type/$f resulted in a different dump ****"
-          # diff always exits non-zero here; || true keeps set -e from
-          # killing this job before it records its result.
-          diff $tmp1 $tmp2 || true
-          failed=$(($failed + 1))
-        fi
-        numtests=$(($numtests + 1))
-        rm -f $tmp1 $tmp2
+        check_list+=("$vdir/objects/$type/$f")
       done
+
+      # One ceph-dencoder process decodes, re-encodes, decodes and compares
+      # every object of this type.  Doing that per object in shell cost three
+      # ~16ms process starts plus a mktemp/cmp/rm each, which dominated this
+      # test's runtime; ceph-dencoder handles the nondeterministic-dump sorting
+      # internally.  Diagnostics go to stderr, the tally to stdout.
+      if [ ${#check_list[@]} -gt 0 ]; then
+        tally=$($CEPH_DENCODER type "$type" check_objects "${check_list[@]}") || true
+        tally_failed=""
+        tally_numtests=""
+        while read -r tally_line; do
+          case "$tally_line" in
+            failed=*)   tally_failed=${tally_line#failed=} ;;
+            numtests=*) tally_numtests=${tally_line#numtests=} ;;
+          esac
+        done <<< "$tally"
+        if [ -z "$tally_failed" ]; then
+          echo "**** ceph-dencoder check_objects gave no tally for type $type ($arversion) ****"
+          failed=$(($failed + 1))
+        else
+          failed=$(($failed + $tally_failed))
+          numtests=$(($numtests + ${tally_numtests:-0}))
+        fi
+      fi
     else
       echo "skipping unrecognized type $type"
-      rm -f $tmp1 $tmp2
     fi
 
     echo "failed=$failed" > $output_file
@@ -279,7 +272,7 @@ trap 'rm -rf "$resultdir"' EXIT
 running_jobs=0
 jobid=0
 
-for arversion in $(ls $dir/archive | sort -V); do
+for arversion in $archive_versions; do
   vdir="$dir/archive/$arversion"
 
   if [ ! -d "$vdir/objects" ]; then
