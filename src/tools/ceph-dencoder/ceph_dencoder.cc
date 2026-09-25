@@ -16,8 +16,11 @@
 
 #include <errno.h>
 
+#include <algorithm>
 #include <filesystem>
+#include <map>
 #include <iomanip>
+#include <sstream>
 
 #include "ceph_ver.h"
 #include "include/types.h"
@@ -32,6 +35,81 @@
 namespace fs = std::filesystem;
 
 using namespace std;
+
+// Sort a JSON dump line-wise and drop each line's trailing comma, so that two
+// dumps of a nondeterministically-ordered object can be compared.  Mirrors the
+// `LC_ALL=C sort | sed 's/,$//'` that src/test/encoding/readable.sh used to run
+// per object: std::string compares byte-wise, which is what LC_ALL=C gives.
+static string sorted_lines(const string& s)
+{
+  vector<string> lines;
+  for (size_t pos = 0; pos <= s.size(); ) {
+    size_t nl = s.find('\n', pos);
+    if (nl == string::npos) {
+      if (pos < s.size())
+        lines.push_back(s.substr(pos));
+      break;
+    }
+    lines.push_back(s.substr(pos, nl - pos));
+    pos = nl + 1;
+  }
+  std::sort(lines.begin(), lines.end());
+  string out;
+  for (auto line : lines) {
+    if (!line.empty() && line.back() == ',')
+      line.pop_back();
+    out += line;
+    out += '\n';
+  }
+  return out;
+}
+
+// Report how two json dumps differ, as the `diff` in readable.sh used to.
+// Lines are compared as a multiset, so one inserted or removed line does not
+// make every line after it look different.  A pure reordering is called out
+// separately: for a deterministic type that is itself the failure, and without
+// this it would print no lines at all.
+static void report_dump_diff(const string& a, const string& b, ostream& out)
+{
+  auto split = [](const string& s) {
+    vector<string> v;
+    for (size_t pos = 0; pos <= s.size(); ) {
+      size_t nl = s.find('\n', pos);
+      if (nl == string::npos) {
+        if (pos < s.size())
+          v.push_back(s.substr(pos));
+        break;
+      }
+      v.push_back(s.substr(pos, nl - pos));
+      pos = nl + 1;
+    }
+    return v;
+  };
+  map<string,int> delta;
+  for (const auto& l : split(a))
+    ++delta[l];
+  for (const auto& l : split(b))
+    --delta[l];
+
+  constexpr int max_report = 20;
+  int shown = 0, more = 0;
+  for (const auto& [line, d] : delta) {
+    if (d == 0)
+      continue;
+    for (int k = 0, n = (d > 0 ? d : -d); k < n; ++k) {
+      if (shown < max_report) {
+        out << (d > 0 ? "  -" : "  +") << line << std::endl;
+        ++shown;
+      } else {
+        ++more;
+      }
+    }
+  }
+  if (shown == 0)
+    out << "  (same lines, different order)" << std::endl;
+  else if (more > 0)
+    out << "  ... and " << more << " more differing lines" << std::endl;
+}
 
 void usage(ostream &out)
 {
@@ -62,6 +140,11 @@ void usage(ostream &out)
   out << "  count_tests         print number of generated test objects (to stdout)\n";
   out << "  select_test <n>     select generated test object as in-memory object\n";
   out << "  is_deterministic    exit w/ success if type encodes deterministically\n";
+  out << "\n";
+  out << "  check_objects <file>...\n";
+  out << "                      decode each file, re-encode, decode again and compare the\n";
+  out << "                      json dumps; print failed=/numtests= tallies to stdout and\n";
+  out << "                      per-object diagnostics to stderr\n";
 }
 
 vector<DencoderPlugin> load_plugins()
@@ -275,6 +358,65 @@ int main(int argc, const char **argv)
 	return 0;
       else
 	return 1;
+    } else if (*i == string("check_objects")) {
+      if (!den) {
+	cerr << "must first select type with 'type <name>'" << std::endl;
+	return 1;
+      }
+      // Check every remaining argument as an encoded object of the selected
+      // type: decode, re-encode, decode again, and compare the two json dumps.
+      // This is the inner loop of src/test/encoding/readable.sh, which used to
+      // spend three ~16ms ceph-dencoder process starts per object to do it.
+      const bool deterministic = den->is_deterministic();
+      auto dump_current = [&]() {
+	JSONFormatter jf(true);
+	jf.open_object_section("object");
+	den->dump(&jf);
+	jf.close_section();
+	ostringstream ss;
+	jf.flush(ss);
+	return ss.str();
+      };
+      unsigned numtests = 0, failed = 0;
+      for (++i; i != args.end(); ++i) {
+	string path = *i;
+	bufferlist bl;
+	string rderr;
+	if (bl.read_file(path.c_str(), &rderr) < 0) {
+	  cerr << "**** failed to read " << path << ": " << rderr << " ****" << std::endl;
+	  ++failed;
+	  continue;
+	}
+	if (string e = den->decode(bl, skip); !e.empty()) {
+	  cerr << "**** failed to decode " << path << ": " << e << " ****" << std::endl;
+	  ++failed;
+	  continue;
+	}
+	string first = dump_current();
+	bufferlist reencoded;
+	den->encode(reencoded, features | CEPH_FEATURE_RESERVED); // hack for OSDMap
+	if (string e = den->decode(reencoded, skip); !e.empty()) {
+	  cerr << "**** failed to decode re-encode of " << path << ": " << e
+	       << " ****" << std::endl;
+	  ++failed;
+	  continue;
+	}
+	string second = dump_current();
+	if (!deterministic) {
+	  first = sorted_lines(first);
+	  second = sorted_lines(second);
+	}
+	if (first != second) {
+	  cerr << "**** reencode of " << path
+	       << " resulted in a different dump ****" << std::endl;
+	  report_dump_diff(first, second, cerr);
+	  ++failed;
+	}
+	++numtests;
+      }
+      cout << "failed=" << failed << std::endl;
+      cout << "numtests=" << numtests << std::endl;
+      return failed ? 1 : 0;
     } else {
       cerr << "unknown option '" << *i << "'" << std::endl;
       return 1;
