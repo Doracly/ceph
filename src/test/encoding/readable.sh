@@ -45,6 +45,7 @@ if [ -z "$myversion" ]; then
   echo "Failed to get version from $CEPH_DENCODER"
   exit 1
 fi
+
 # Both of these are the same for every object checked below, but test_object
 # runs once per (archive version, type) pair -- about 5300 times -- and each
 # call was recomputing them at the cost of a ceph-dencoder start and an
@@ -55,6 +56,17 @@ while read -r known_type; do
 done < <($CEPH_DENCODER list_types)
 
 archive_versions=$(ls "$dir/archive" | sort -V)
+
+# The incompat checks compare versions with `sort -V`, which orders a git
+# hash (a build without a release tag) by its leading characters.  Such a
+# build is newer than every archive: compare it as "zzzzz", which sorts last.
+if [[ "$myversion" =~ ^[0-9]+\.[0-9]+ ]]; then
+  cmpversion=$myversion
+else
+  echo "ceph-dencoder version '$myversion' is not a release version;" \
+       "treating the decoder as newer than every archive"
+  cmpversion=zzzzz
+fi
 
 DEBUG=0
 debug() { if [ "$DEBUG" -gt 0 ]; then echo "DEBUG: $*" >&2; fi }
@@ -147,8 +159,8 @@ test_object() {
       # Skip if forward incompatibility places archive and decoder on opposite sides of a change
       if [ -n "$forward_versions" ]; then
         for forward_version in $forward_versions; do
-          if versions_span "$myversion" "$arversion" "$forward_version"; then
-            if version_lt "$myversion" "$forward_version"; then
+          if versions_span "$cmpversion" "$arversion" "$forward_version"; then
+            if version_lt "$cmpversion" "$forward_version"; then
               echo "skipping forward incompat $type version $arversion, requires decoder >= $forward_version, current decoder is $myversion"
             else
               echo "skipping forward incompat $type version $arversion, decoder >= $forward_version incompatible with objects < $forward_version (current decoder is $myversion)"
@@ -164,7 +176,7 @@ test_object() {
       # Only skip whole type if NO per-object markers exist (like forward_incompat)
       if [ -n "$backward_incompat" ] && [ -z "$backward_incompat_paths" ]; then
         # Use sort -V for proper version comparison (handles 19.5 vs 19.10 correctly)
-        if version_lt "$myversion" "$backward_incompat"; then
+        if version_lt "$cmpversion" "$backward_incompat"; then
           echo "skipping backward incompat $type version $arversion, requires decoder >= $backward_incompat, current decoder is $myversion"
           echo "failed=$failed" > $output_file
           echo "numtests=$numtests" >> $output_file
@@ -185,9 +197,9 @@ test_object() {
           for entry in $forward_paths; do
             marker_version=${entry%%:*}
             marker_path=${entry#*:}
-            if versions_span "$myversion" "$arversion" "$marker_version"; then
+            if versions_span "$cmpversion" "$arversion" "$marker_version"; then
               if [ -L "$marker_path/$f" ]; then
-                if version_lt "$myversion" "$marker_version"; then
+                if version_lt "$cmpversion" "$marker_version"; then
                   echo "skipping object $f of type $type (forward incompat requires decoder >= $marker_version, current is $myversion)"
                 else
                   echo "skipping object $f of type $type (forward incompat for decoder >= $marker_version, current is $myversion)"
@@ -202,7 +214,7 @@ test_object() {
         if [ -n "$backward_incompat_paths" ]; then
           # Only skip individual objects marked as backward_incompat if decoder is too old
           # Use sort -V for proper version comparison
-          if version_lt "$myversion" "$backward_incompat"; then
+          if version_lt "$cmpversion" "$backward_incompat"; then
             for b_path in $backward_incompat_paths; do
               # Check if $f is a symbolic link and if it's pointing to existing target
               if [ -L "$b_path/$f" ]; then
