@@ -704,7 +704,7 @@ void KernelDevice::_aio_thread()
     if (r > 0) {
       dout(30) << __func__ << " got " << r << " completed aios" << dendl;
       for (int i = 0; i < r; ++i) {
-	IOContext *ioc = static_cast<IOContext*>(aio[i]->priv);
+	IOContext *ioc = static_cast<IOContext*>(aio[i]->load_priv_acquire());
 	_aio_log_finish(ioc, aio[i]->offset, aio[i]->length);
 	if (aio[i]->queue_item.is_linked()) {
 	  std::lock_guard l(debug_queue_lock);

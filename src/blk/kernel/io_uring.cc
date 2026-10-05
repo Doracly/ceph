@@ -30,6 +30,8 @@ static int ioring_get_cqe(struct ioring_data *d, unsigned int max,
   unsigned head;
   io_uring_for_each_cqe(ring, head, cqe) {
     struct aio_t *io = (struct aio_t *)(uintptr_t) io_uring_cqe_get_data(cqe);
+    // pairs with the release in ioring_queue()
+    (void)io->load_priv_acquire();
     io->rval = cqe->res;
 
     paio[nr++] = io;
@@ -85,7 +87,7 @@ static int ioring_queue(struct ioring_data *d, void *priv,
       break;
 
     io = &*beg;
-    io->priv = priv;
+    io->store_priv_release(priv);
 
     init_sqe(d, sqe, io);
 

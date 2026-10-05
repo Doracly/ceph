@@ -34,7 +34,7 @@ int aio_queue_t::submit_batch(aio_iter begin, aio_iter end,
   while (cur != end || pushed < pulled) {
 #if defined(HAVE_LIBAIO)
     while (cur != end && pulled < max_iodepth) {
-      cur->priv = priv;
+      cur->store_priv_release(priv);
       piocb[pulled] = &(*cur);
       ++pulled;
       ++cur;
@@ -47,7 +47,7 @@ int aio_queue_t::submit_batch(aio_iter begin, aio_iter end,
       r = -EAGAIN;
     }
 #elif defined(HAVE_POSIXAIO)
-    cur->priv = priv;
+    cur->store_priv_release(priv);
     if (cur->n_aiocb == 1) {
       // TODO: consider batching multiple reads together with lio_listio
       cur->aio.aiocb.aio_sigevent.sigev_notify = SIGEV_KEVENT;
@@ -107,9 +107,12 @@ int aio_queue_t::get_next_completed(int timeout_ms, aio_t **paio, int max)
   for (int i=0; i<r; ++i) {
 #if defined(HAVE_LIBAIO)
     paio[i] = (aio_t *)events[i].obj;
+    // pairs with the release in submit_batch()
+    (void)paio[i]->load_priv_acquire();
     paio[i]->rval = events[i].res;
 #else
     paio[i] = (aio_t*)events[i].udata;
+    (void)paio[i]->load_priv_acquire();
     if (paio[i]->n_aiocb == 1) {
       paio[i]->rval = aio_return(&paio[i]->aio.aiocb);
     } else {

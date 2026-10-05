@@ -15,6 +15,8 @@
 #include <boost/intrusive/list.hpp>
 #include <boost/container/small_vector.hpp>
 
+#include <atomic>
+
 #include "include/buffer.h"
 #include "include/types.h"
 
@@ -77,6 +79,16 @@ struct aio_t {
       offset += iov[i].iov_len;
     }
 #endif
+  }
+
+  // priv is stored last before the iocb goes to the kernel and loaded first
+  // on completion, publishing the rest of aio_t across a handoff that the C++
+  // memory model (and TSan) cannot see.  atomic_ref keeps aio_t movable.
+  void store_priv_release(void *p) {
+    std::atomic_ref<void*>(priv).store(p, std::memory_order_release);
+  }
+  void *load_priv_acquire() {
+    return std::atomic_ref<void*>(priv).load(std::memory_order_acquire);
   }
 
   long get_return_value() {
