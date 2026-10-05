@@ -36,7 +36,8 @@ class mutex_debugging_base
 {
 protected:
   std::string group;
-  int id = -1;
+  // -1 until registered; accessed outside the mutex, see _lockdep_id()
+  std::atomic<int> id = -1;
   bool lockdep;   // track this mutex using lockdep_*
   bool backtrace; // gather backtrace on lock acquisition
 
@@ -44,8 +45,9 @@ protected:
   std::atomic<std::thread::id> locked_by = {};
 
   bool _enable_lockdep() const {
-    return lockdep && g_lockdep;
+    return lockdep && g_lockdep.load(std::memory_order_relaxed);
   }
+  int _lockdep_id(); // registers on first use
   void _register();
   void _will_lock(bool recursive=false); // about to lock
   void _locked(); // just locked

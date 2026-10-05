@@ -25,7 +25,7 @@ protected:
     cct->_conf->cluster = "ceph";
     cct->_conf.set_val("lockdep", "true");
     cct->_conf.apply_changes(nullptr);
-    ASSERT_TRUE(g_lockdep);
+    ASSERT_TRUE(g_lockdep.load(std::memory_order_relaxed));
   }
   void TearDown() final
   {

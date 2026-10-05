@@ -31,11 +31,30 @@ class RWLock final
 {
   mutable pthread_rwlock_t L;
   std::string name;
-  mutable int id;
+  mutable std::atomic<int> id;
   mutable std::atomic<unsigned> nrlock = { 0 }, nwlock = { 0 };
   bool track, lockdep;
 
   std::string unique_name(const char* name) const;
+
+  // Registers on first use.  Each registration takes a reference that the
+  // dtor drops only once, so a thread losing the race returns its own.
+  int lockdep_id() const {
+    int cur = id.load(std::memory_order_relaxed);
+    if (cur >= 0) {
+      return cur;
+    }
+    const int fresh = lockdep_register(name.c_str());
+    if (fresh < 0) {
+      return fresh; // lockdep disabled
+    }
+    if (id.compare_exchange_strong(cur, fresh, std::memory_order_relaxed,
+                                   std::memory_order_relaxed)) {
+      return fresh;
+    }
+    lockdep_unregister(fresh);
+    return cur; // the winner's id
+  }
 
 public:
   RWLock(const RWLock& other) = delete;
@@ -64,7 +83,8 @@ public:
     ANNOTATE_BENIGN_RACE_SIZED(&id, sizeof(id), "RWLock lockdep id");
     ANNOTATE_BENIGN_RACE_SIZED(&nrlock, sizeof(nrlock), "RWlock nrlock");
     ANNOTATE_BENIGN_RACE_SIZED(&nwlock, sizeof(nwlock), "RWlock nwlock");
-    if (lockdep && g_lockdep) id = lockdep_register(name.c_str());
+    if (lockdep && lockdep_enabled())
+      id.store(lockdep_register(name.c_str()), std::memory_order_relaxed);
   }
 
   bool is_locked() const {
@@ -82,9 +102,8 @@ public:
     if (track)
       ceph_assert(!is_locked());
     pthread_rwlock_destroy(&L);
-    if (lockdep && g_lockdep) {
-      lockdep_unregister(id);
-    }
+    // unconditionally, lockdep may have been disabled since; -1 is ignored
+    lockdep_unregister(id.load(std::memory_order_relaxed));
   }
 
   void unlock(bool lockdep=true) const {
@@ -96,18 +115,18 @@ public:
         nrlock--;
       }
     }
-    if (lockdep && this->lockdep && g_lockdep)
-      id = lockdep_will_unlock(name.c_str(), id);
+    if (lockdep && this->lockdep && lockdep_enabled())
+      (void)lockdep_will_unlock(name.c_str(), lockdep_id());
     int r = pthread_rwlock_unlock(&L);
     ceph_assert(r == 0);
   }
 
   // read
   void get_read() const {
-    if (lockdep && g_lockdep) id = lockdep_will_lock(name.c_str(), id);
+    if (lockdep && lockdep_enabled()) (void)lockdep_will_lock(name.c_str(), lockdep_id());
     int r = pthread_rwlock_rdlock(&L);
     ceph_assert(r == 0);
-    if (lockdep && g_lockdep) id = lockdep_locked(name.c_str(), id);
+    if (lockdep && lockdep_enabled()) (void)lockdep_locked(name.c_str(), lockdep_id());
     if (track)
       nrlock++;
   }
@@ -115,7 +134,7 @@ public:
     if (pthread_rwlock_tryrdlock(&L) == 0) {
       if (track)
          nrlock++;
-      if (lockdep && g_lockdep) id = lockdep_locked(name.c_str(), id);
+      if (lockdep && lockdep_enabled()) (void)lockdep_locked(name.c_str(), lockdep_id());
       return true;
     }
     return false;
@@ -131,20 +150,20 @@ public:
   }
   // write
   void get_write(bool lockdep=true) {
-    if (lockdep && this->lockdep && g_lockdep)
-      id = lockdep_will_lock(name.c_str(), id);
+    if (lockdep && this->lockdep && lockdep_enabled())
+      (void)lockdep_will_lock(name.c_str(), lockdep_id());
     int r = pthread_rwlock_wrlock(&L);
     ceph_assert(r == 0);
-    if (lockdep && this->lockdep && g_lockdep)
-      id = lockdep_locked(name.c_str(), id);
+    if (lockdep && this->lockdep && lockdep_enabled())
+      (void)lockdep_locked(name.c_str(), lockdep_id());
     if (track)
       nwlock++;
 
   }
   bool try_get_write(bool lockdep=true) {
     if (pthread_rwlock_trywrlock(&L) == 0) {
-      if (lockdep && this->lockdep && g_lockdep)
-	id = lockdep_locked(name.c_str(), id);
+      if (lockdep && this->lockdep && lockdep_enabled())
+	(void)lockdep_locked(name.c_str(), lockdep_id());
       if (track)
          nwlock++;
       return true;

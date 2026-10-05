@@ -20,7 +20,10 @@
 
 #ifdef CEPH_DEBUG_MUTEX
 
-__attribute__((visibility("default"))) extern bool g_lockdep;
+#include <atomic>
+
+// toggled while other threads read it; relaxed, it only gates the hooks
+__attribute__((visibility("default"))) extern std::atomic<bool> g_lockdep;
 
 extern void lockdep_register_ceph_context(CephContext *cct);
 extern void lockdep_unregister_ceph_context(CephContext *cct);
@@ -35,9 +38,15 @@ extern int lockdep_locked(const char *n, int id, bool force_backtrace=false);
 extern int lockdep_will_unlock(const char *n, int id);
 extern int lockdep_dump_locks();
 
+// for code that is also built without CEPH_DEBUG_MUTEX
+inline bool lockdep_enabled() {
+  return g_lockdep.load(std::memory_order_relaxed);
+}
+
 #else
 
 static constexpr bool g_lockdep = false;
+constexpr bool lockdep_enabled() { return false; }
 #define lockdep_register(...) 0
 #define lockdep_unregister(...)
 #define lockdep_will_lock(...) 0

@@ -30,11 +30,11 @@
 #define BACKTRACE_SKIP 2
 
 /******* Globals **********/
-bool g_lockdep;
+std::atomic<bool> g_lockdep;
 struct lockdep_stopper_t {
   // disable lockdep when this module destructs.
   ~lockdep_stopper_t() {
-    g_lockdep = 0;
+    g_lockdep.store(false, std::memory_order_relaxed);
   }
 };
 
@@ -73,7 +73,7 @@ void lockdep_register_ceph_context(CephContext *cct)
                                "lockdep cct");
     ANNOTATE_BENIGN_RACE_SIZED(&g_lockdep, sizeof(g_lockdep),
                                "lockdep enabled");
-    g_lockdep = true;
+    g_lockdep.store(true, std::memory_order_relaxed);
     g_lockdep_ceph_ctx = cct;
     lockdep_dout(1) << "lockdep start" << dendl;
     if (!free_ids_inited) {
@@ -91,7 +91,7 @@ void lockdep_unregister_ceph_context(CephContext *cct)
   if (cct == g_lockdep_ceph_ctx) {
     lockdep_dout(1) << "lockdep stop" << dendl;
     // this cct is going away; shut it down!
-    g_lockdep = false;
+    g_lockdep.store(false, std::memory_order_relaxed);
     g_lockdep_ceph_ctx = NULL;
 
     // blow away all of our state, too, in case it starts up again.
@@ -115,7 +115,7 @@ void lockdep_unregister_ceph_context(CephContext *cct)
 int lockdep_dump_locks()
 {
   pthread_mutex_lock(&lockdep_mutex);
-  if (!g_lockdep)
+  if (!g_lockdep.load(std::memory_order_relaxed))
     goto out;
 
   for (auto p = held.begin(); p != held.end(); ++p) {
@@ -164,7 +164,7 @@ static int _lockdep_register(const char *name)
 {
   int id = -1;
 
-  if (!g_lockdep)
+  if (!g_lockdep.load(std::memory_order_relaxed))
     return id;
   auto p = lock_ids.find(name);
   if (p == lock_ids.end()) {
@@ -243,7 +243,7 @@ void lockdep_unregister(int id)
     lock_refs.erase(id);
     free_ids.set(id);
     last_freed_id = id;
-  } else if (g_lockdep) {
+  } else if (g_lockdep.load(std::memory_order_relaxed)) {
     lockdep_dout(20) << "have " << refs << " of '" << name << "' " <<
 			"from " << id << dendl;
   }
@@ -288,7 +288,7 @@ int lockdep_will_lock(const char *name, int id, bool force_backtrace,
   pthread_t p = pthread_self();
 
   pthread_mutex_lock(&lockdep_mutex);
-  if (!g_lockdep) {
+  if (!g_lockdep.load(std::memory_order_relaxed)) {
     pthread_mutex_unlock(&lockdep_mutex);
     return id;
   }
@@ -364,7 +364,7 @@ int lockdep_locked(const char *name, int id, bool force_backtrace)
   pthread_t p = pthread_self();
 
   pthread_mutex_lock(&lockdep_mutex);
-  if (!g_lockdep)
+  if (!g_lockdep.load(std::memory_order_relaxed))
     goto out;
   if (id < 0)
     id = _lockdep_register(name);
@@ -390,7 +390,7 @@ int lockdep_will_unlock(const char *name, int id)
   }
 
   pthread_mutex_lock(&lockdep_mutex);
-  if (!g_lockdep)
+  if (!g_lockdep.load(std::memory_order_relaxed))
     goto out;
   lockdep_dout(20) << "_will_unlock " << name << dendl;
 
