@@ -5450,8 +5450,13 @@ void RGWPostObj::execute(optional_yield y)
       ldpp_dout(this, 15) << "supplied_md5=" << supplied_md5 << dendl;
     }
 
+    const std::string filename = get_current_filename();
+    if (filename.empty()) {
+      op_ret = -EINVAL;
+      return;
+    }
     std::unique_ptr<rgw::sal::Object> obj =
-		     s->bucket->get_object(rgw_obj_key(get_current_filename()));
+		     s->bucket->get_object(rgw_obj_key(filename));
     if (s->bucket->versioning_enabled()) {
       obj->gen_rand_obj_instance_name();
     }
