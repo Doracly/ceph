@@ -8839,9 +8839,13 @@ int RGWBulkUploadOp::handle_dir(const std::string_view path, optional_yield y)
     return ret;
   }
 
+  const auto parsed = parse_path(path);
+  if (!parsed) {
+    return -EINVAL;
+  }
   std::string bucket_name;
   rgw_obj_key object_junk;
-  std::tie(bucket_name, object_junk) =  *parse_path(path);
+  std::tie(bucket_name, object_junk) = *parsed;
 
   rgw_bucket new_bucket;
   new_bucket.tenant = s->bucket_tenant; /* ignored if bucket exists */
@@ -8939,9 +8943,18 @@ int RGWBulkUploadOp::handle_file(const std::string_view path,
     return op_ret;
   }
 
+  const auto parsed = parse_path(path);
+  if (!parsed) {
+    op_ret = -EINVAL;
+    return op_ret;
+  }
   std::string bucket_name;
   rgw_obj_key object;
-  std::tie(bucket_name, object) = *parse_path(path);
+  std::tie(bucket_name, object) = *parsed;
+  if (object.empty()) {
+    op_ret = -EINVAL;
+    return op_ret;
+  }
 
   std::unique_ptr<rgw::sal::Bucket> bucket;
   ACLOwner bowner;
