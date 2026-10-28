@@ -3075,7 +3075,8 @@ int RGWHandler_REST_SWIFT::init_from_header(rgw::sal::Driver* driver,
 
   /* Skip the leading slash of URL hierarchy. */
   if (!req_name.starts_with('/')) {
-    return 0;
+    // e.g. url_decode() failed and returned an empty string
+    return -ERR_BAD_URL;
   } else {
     req_name.remove_prefix(1);
   }
