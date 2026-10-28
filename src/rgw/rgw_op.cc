@@ -2569,7 +2569,8 @@ int RGWGetObj::handle_slo_manifest(bufferlist& bl, optional_yield y)
   }
   ldpp_dout(this, 2) << "RGWGetObj::handle_slo_manifest()" << dendl;
 
-  vector<RGWAccessControlPolicy> allocated_acls;
+  // deque: parts keep pointers to its elements
+  std::deque<RGWAccessControlPolicy> allocated_acls;
   map<string, pair<RGWAccessControlPolicy *, boost::optional<Policy>>> policies;
   map<string, std::unique_ptr<rgw::sal::Bucket>> buckets;
   const std::string& auth_tenant = s->auth.identity->get_tenant();
@@ -2637,11 +2638,11 @@ int RGWGetObj::handle_slo_manifest(bufferlist& bl, optional_yield y)
                            << bucket << dendl;
           return r;
 	}
-	auto _bucket_policy = get_iam_policy_from_attr(
-	  s->cct, tmp_bucket->get_attrs(), auth_tenant);
-        bucket_policy = _bucket_policy.get_ptr();
+	auto& policy = policies[bucket_name];
+	policy = make_pair(bucket_acl, get_iam_policy_from_attr(
+	  s->cct, tmp_bucket->get_attrs(), auth_tenant));
+        bucket_policy = policy.second.get_ptr();
 	buckets[bucket_name].swap(tmp_bucket);
-        policies[bucket_name] = make_pair(bucket_acl, _bucket_policy);
       }
     } else {
       bucket = s->bucket.get();
