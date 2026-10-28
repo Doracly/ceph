@@ -1757,6 +1757,7 @@ RGWBulkUploadOp_ObjStore_SWIFT::create_stream()
     const DoutPrefixProvider* dpp;
     const size_t conlen;
     size_t curpos;
+    ssize_t read_err = 0;
     req_state* const s;
 
   public:
@@ -1779,13 +1780,18 @@ RGWBulkUploadOp_ObjStore_SWIFT::create_stream()
                         << max_to_read
                         << ", dst.c_str()=" << reinterpret_cast<intptr_t>(dst.c_str()) << dendl;
 
+      if (read_err < 0) {
+        // Another read would wait for the request timeout.
+        return read_err;
+      }
       bufferptr bp(max_to_read);
       const auto read_len = recv_body(s, bp.c_str(), max_to_read);
-      dst.append(bp, 0, read_len);
       //const auto read_len = recv_body(s, dst.c_str(), max_to_read);
       if (read_len < 0) {
+        read_err = read_len;
         return read_len;
       }
+      dst.append(bp, 0, read_len);
 
       curpos += read_len;
       return curpos > s->cct->_conf->rgw_max_put_size ? -ERR_TOO_LARGE
