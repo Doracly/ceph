@@ -6334,7 +6334,7 @@ bool RGWCopyObj::parse_copy_location(const std::string_view& url_src,
   bucket_name = dec_src.substr(0, pos);
   key.name = dec_src.substr(pos + 1);
 
-  if (key.name.empty()) {
+  if (bucket_name.empty() || key.name.empty()) {
     return false;
   }
 
