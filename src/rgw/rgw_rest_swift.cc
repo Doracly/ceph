@@ -3192,6 +3192,10 @@ int RGWHandler_REST_SWIFT::init(rgw::sal::Driver* driver, req_state* s,
   }
 
   if (s->op == OP_COPY) {
+    if (rgw::sal::Object::empty(s->object.get())) {
+      return -ERR_METHOD_NOT_ALLOWED;
+    }
+
     std::string req_dest = s->info.env->get("HTTP_DESTINATION", "");
     if (req_dest.empty())
       return -ERR_BAD_URL;
