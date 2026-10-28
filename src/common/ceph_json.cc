@@ -232,6 +232,35 @@ void JSONParser::handle_data(const char *s, int len)
   buf_len += len;
 }
 
+// json_spirit recurses per nesting level; deep input overflows small stacks
+// such as radosgw's coroutine stacks.
+static constexpr int max_json_depth = 64;
+
+static bool too_deep(std::string_view json)
+{
+  int depth = 0;
+  bool in_string = false;
+  for (size_t i = 0; i < json.size(); ++i) {
+    const char c = json[i];
+    if (in_string) {
+      if (c == '\\') {
+        ++i;
+      } else if (c == '"') {
+        in_string = false;
+      }
+    } else if (c == '"') {
+      in_string = true;
+    } else if (c == '[' || c == '{') {
+      if (++depth > max_json_depth) {
+        return true;
+      }
+    } else if (c == ']' || c == '}') {
+      --depth;
+    }
+  }
+  return false;
+}
+
 // parse a supplied JSON fragment
 bool JSONParser::parse(const char *buf_, int len)
 {
@@ -241,7 +270,7 @@ bool JSONParser::parse(const char *buf_, int len)
   }
 
   string json_string(buf_, len);
-  success = read(json_string, data);
+  success = !too_deep(json_string) && read(json_string, data);
   if (success) {
     handle_value(data);
     if (data.type() != obj_type &&
@@ -268,7 +297,7 @@ bool JSONParser::parse(const char *buf_, int len)
 bool JSONParser::parse(int len)
 {
   string json_string = json_buffer.substr(0, len);
-  success = read(json_string, data);
+  success = !too_deep(json_string) && read(json_string, data);
   if (success)
     handle_value(data);
   else
@@ -280,7 +309,7 @@ bool JSONParser::parse(int len)
 // parse the complete internal json_buffer
 bool JSONParser::parse()
 {
-  success = read(json_buffer, data);
+  success = !too_deep(json_buffer) && read(json_buffer, data);
   if (success)
     handle_value(data);
   else
