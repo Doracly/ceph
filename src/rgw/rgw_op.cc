@@ -2603,6 +2603,9 @@ int RGWGetObj::handle_slo_manifest(bufferlist& bl, optional_yield y)
 
     string bucket_name = path.substr(pos_init, pos_sep - pos_init);
     string obj_name = path.substr(pos_sep + 1);
+    if (obj_name.empty()) {
+      return -EINVAL;
+    }
 
     rgw::sal::Bucket* bucket;
     RGWAccessControlPolicy *bucket_acl;

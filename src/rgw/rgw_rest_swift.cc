@@ -954,6 +954,9 @@ int RGWPutObj_ObjStore_SWIFT::update_slo_segment_size(rgw_slo_entry& entry) {
 
   string bucket_name = path.substr(pos_init, pos_sep - pos_init);
   string obj_name = path.substr(pos_sep + 1);
+  if (obj_name.empty()) {
+    return -EINVAL;
+  }
 
   std::unique_ptr<rgw::sal::Bucket> bucket;
 
