@@ -8764,7 +8764,7 @@ RGWBulkUploadOp::parse_path(const std::string_view& path)
 
   if (std::string_view::npos != start_pos) {
     /* Separator is the first slash after the leading ones. */
-    const size_t sep_pos = path.substr(start_pos).find('/');
+    const size_t sep_pos = path.find('/', start_pos);
 
     if (std::string_view::npos != sep_pos) {
       const auto bucket_name = path.substr(start_pos, sep_pos - start_pos);
