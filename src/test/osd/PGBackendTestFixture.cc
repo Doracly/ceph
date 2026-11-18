@@ -25,6 +25,7 @@
 #include "messages/MOSDPGPush.h"
 #include "messages/MOSDPGPushReply.h"
 #include "messages/MOSDPGPull.h"
+#include <cstring>
 
 // PrimaryLogPG holds client ops until a peering PG is active.
 static bool holds_client_ops(TestPG* primary)
@@ -1311,15 +1312,7 @@ void PGBackendTestFixture::verify_object(
     const char* read_buf = read_data.c_str();
     const char* expected_buf = expected.c_str() + offset;
 
-    bool has_mismatch = false;
-    for (size_t i = 0; i < size; i++) {
-      if (read_buf[i] != expected_buf[i]) {
-        has_mismatch = true;
-        break;
-      }
-    }
-
-    if (has_mismatch) {
+    if (std::memcmp(read_buf, expected_buf, size) != 0) {
       visualize_miscompare(obj_name, expected_buf, read_buf, size, "verify_object");
       FAIL() << "Data mismatch detected for " << obj_name;
     }
@@ -1868,12 +1861,17 @@ bufferlist PGBackendTestFixture::create_random_buffer(size_t size)
 
   ceph::buffer::ptr bp(size);
 
+  // splitmix64, 8 bytes per step: mt19937_64 spent most of its time
+  // refilling its state
   std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<unsigned char> dis(0, 255);
-
-  for (size_t i = 0; i < size; ++i) {
-    bp[i] = dis(gen);
+  uint64_t state = (uint64_t(rd()) << 32) | rd();
+  char* data = bp.c_str();
+  for (size_t i = 0; i < size; i += sizeof(uint64_t)) {
+    uint64_t z = (state += 0x9e3779b97f4a7c15);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
+    z ^= z >> 31;
+    std::memcpy(data + i, &z, std::min(sizeof(z), size - i));
   }
 
   bl.append(std::move(bp));

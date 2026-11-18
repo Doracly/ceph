@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 #include <gtest/gtest-spi.h>
+#include <cstring>
 #include "test/osd/ECPeeringTestFixture.h"
 #include "osd/osd_perf_counters.h"
 #include "osd/PrimaryLogPG.h"
@@ -291,8 +292,12 @@ protected:
         }
         const uint64_t length = std::min(stripe_unit, stored.length() - offset);
         const char* actual = stored.c_str() + offset;
+        const char* expected_buf = expected.c_str();
+        if (std::memcmp(actual, expected_buf, length) == 0) {
+          continue;
+        }
         for (uint64_t i = 0; i < length; ++i) {
-          if (actual[i] != expected.c_str()[i]) {
+          if (actual[i] != expected_buf[i]) {
             ADD_FAILURE() << (in.contains(id) ? "data" : "parity")
                           << " shard " << shard << " differs from the model"
                           << " at shard offset " << offset + i
