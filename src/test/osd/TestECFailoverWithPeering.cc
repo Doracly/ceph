@@ -48,6 +48,12 @@ struct ObjectScenario {
   std::vector<std::vector<ObjOp>> ops;
 };
 
+/* The objects of a case; their names start with the case's name. */
+struct TruncateRun {
+  std::string name;
+  std::vector<ObjectScenario> objects;
+};
+
 }  // namespace
 
 /**
@@ -367,16 +373,24 @@ protected:
    */
   void run_forward(const std::string& name,
                    const std::vector<ObjectScenario>& objects) {
+    run_forward(std::vector<TruncateRun>{{name, objects}});
+  }
+
+  /* run_forward for several cases on this cluster: each case's ops run and
+   * are checked in turn, then the OSD goes down once for all of them. */
+  void run_forward(const std::vector<TruncateRun>& runs) {
     ASSERT_TRUE(all_shards_active()) << "Initial peering must complete";
-    auto models = create_objects(name, objects);
-    const auto queued = queue_all_ops(name, objects, models);
-    event_loop->run_until_idle();
-    for (const auto& op : queued) {
-      EXPECT_EQ(0, *op.result);
-    }
-    {
+    std::vector<std::vector<std::string>> models;
+    for (const auto& [name, objects] : runs) {
+      SCOPED_TRACE(name);
+      models.push_back(create_objects(name, objects));
+      const auto queued = queue_all_ops(name, objects, models.back());
+      event_loop->run_until_idle();
+      for (const auto& op : queued) {
+        EXPECT_EQ(0, *op.result);
+      }
       SCOPED_TRACE("after the ops");
-      verify_objects(name, models, {});
+      verify_objects(name, models.back(), {});
     }
 
     const int down = get_shard(0);
@@ -384,7 +398,10 @@ protected:
     event_loop->run_until_idle();
     ASSERT_TRUE(all_shards_active()) << "All shards should be active after peering";
     SCOPED_TRACE("with shard " + std::to_string(down) + " down");
-    verify_objects(name, models, {down});
+    for (size_t r = 0; r < runs.size(); ++r) {
+      SCOPED_TRACE(runs[r].name);
+      verify_objects(runs[r].name, models[r], {down});
+    }
   }
 
   /* Submit the ops of each object so that they reach every shard except
@@ -399,42 +416,69 @@ protected:
                     const std::vector<ObjectScenario>& objects,
                     int blocked_shard,
                     int failing_shard) {
+    run_rollback(std::vector<TruncateRun>{{name, objects}}, blocked_shard,
+                 failing_shard);
+  }
+
+  /* run_rollback for several cases on this cluster: the ops of all cases are
+   * in flight together and one failure rolls them back. An EC PG completes
+   * its ops in order, so an op that would complete first in a case of its
+   * own waits behind any earlier case's op on blocked_shard. */
+  void run_rollback(const std::vector<TruncateRun>& runs,
+                    int blocked_shard,
+                    int failing_shard) {
     ASSERT_TRUE(all_shards_active()) << "Initial peering must complete";
     ASSERT_NE(blocked_shard, failing_shard);
     ASSERT_GE(k + m - 1, k) << "Too few shards would remain up";
 
-    const auto originals = create_objects(name, objects);
-    std::vector<std::map<int, bufferlist>> original_shards;
-    for (size_t i = 0; i < objects.size(); ++i) {
-      original_shards.push_back(read_shards(object_name(name, i)));
-    }
-    {
+    struct CaseState {
+      std::vector<std::string> originals;
+      std::vector<std::map<int, bufferlist>> original_shards;
+      std::vector<QueuedOp> queued;
+      std::vector<std::string> expected;
+      std::vector<bool> completed;
+    };
+    std::vector<CaseState> states(runs.size());
+    for (size_t r = 0; r < runs.size(); ++r) {
+      const auto& [name, objects] = runs[r];
+      auto& s = states[r];
+      SCOPED_TRACE(name);
+      s.originals = create_objects(name, objects);
+      for (size_t i = 0; i < objects.size(); ++i) {
+        s.original_shards.push_back(read_shards(object_name(name, i)));
+      }
       SCOPED_TRACE("before the ops");
-      verify_objects(name, originals, {});
+      verify_objects(name, s.originals, {});
     }
 
     const int primary = get_primary_shard_from_osdmap();
     event_loop->suspend_from_to_osd(primary, blocked_shard);
-    auto models = originals;
-    const auto queued = queue_all_ops(name, objects, models);
+    for (size_t r = 0; r < runs.size(); ++r) {
+      auto models = states[r].originals;
+      states[r].queued = queue_all_ops(runs[r].name, runs[r].objects, models);
+    }
     event_loop->run_until_idle();
 
-    auto expected = originals;
-    std::vector<bool> in_flight(objects.size(), false);
-    std::vector<bool> completed(objects.size(), false);
-    for (const auto& op : queued) {
-      if (*op.result == 0) {
-        EXPECT_FALSE(in_flight[op.object]) << "ops must complete in order";
-        expected[op.object] = op.model;
-        completed[op.object] = true;
-      } else {
-        EXPECT_EQ(-EINPROGRESS, *op.result);
-        in_flight[op.object] = true;
+    for (size_t r = 0; r < runs.size(); ++r) {
+      auto& s = states[r];
+      SCOPED_TRACE(runs[r].name);
+      s.expected = s.originals;
+      s.completed.assign(runs[r].objects.size(), false);
+      std::vector<bool> in_flight(runs[r].objects.size(), false);
+      for (const auto& op : s.queued) {
+        if (*op.result == 0) {
+          EXPECT_FALSE(in_flight[op.object]) << "ops must complete in order";
+          s.expected[op.object] = op.model;
+          s.completed[op.object] = true;
+        } else {
+          EXPECT_EQ(-EINPROGRESS, *op.result);
+          in_flight[op.object] = true;
+        }
       }
+      EXPECT_TRUE(std::ranges::any_of(in_flight, std::identity{}))
+        << "No op writes to shard " << blocked_shard
+        << ", so none is left to roll back";
     }
-    EXPECT_TRUE(std::ranges::any_of(in_flight, std::identity{}))
-      << "No op writes to shard " << blocked_shard
-      << ", so none is left to roll back";
 
     mark_osd_down(failing_shard);
     event_loop->unsuspend_from_to_osd(primary, blocked_shard);
@@ -444,20 +488,26 @@ protected:
     SCOPED_TRACE("after rollback with shard " + std::to_string(blocked_shard) +
                  " blocked and shard " + std::to_string(failing_shard) +
                  " failed");
-    verify_objects(name, expected, {failing_shard});
-    for (size_t i = 0; i < objects.size(); ++i) {
-      if (completed[i]) {
-        continue;
-      }
-      const auto shards = read_shards(object_name(name, i));
-      for (int shard = 0; shard < k + m; ++shard) {
-        if (shard == failing_shard) {
+    for (size_t r = 0; r < runs.size(); ++r) {
+      const auto& [name, objects] = runs[r];
+      const auto& s = states[r];
+      SCOPED_TRACE(name);
+      verify_objects(name, s.expected, {failing_shard});
+      for (size_t i = 0; i < objects.size(); ++i) {
+        if (s.completed[i]) {
           continue;
         }
-        EXPECT_EQ(original_shards[i].at(shard).length(), shards.at(shard).length())
-          << "size of shard " << shard << " of " << object_name(name, i);
-        EXPECT_TRUE(original_shards[i].at(shard).contents_equal(shards.at(shard)))
-          << "contents of shard " << shard << " of " << object_name(name, i);
+        const auto shards = read_shards(object_name(name, i));
+        for (int shard = 0; shard < k + m; ++shard) {
+          if (shard == failing_shard) {
+            continue;
+          }
+          EXPECT_EQ(s.original_shards[i].at(shard).length(),
+                    shards.at(shard).length())
+            << "size of shard " << shard << " of " << object_name(name, i);
+          EXPECT_TRUE(s.original_shards[i].at(shard).contents_equal(shards.at(shard)))
+            << "contents of shard " << shard << " of " << object_name(name, i);
+        }
       }
     }
   }
@@ -4272,6 +4322,21 @@ enum class TruncateMode {
   BlockParityRollbackPrimary,
 };
 
+const TruncateMode kTruncateModes[] = {
+  TruncateMode::Forward,
+  TruncateMode::RollbackParity,
+  TruncateMode::RollbackData,
+  TruncateMode::RollbackPrimary,
+  TruncateMode::BlockParityRollbackData,
+  TruncateMode::BlockParityRollbackPrimary,
+};
+
+bool blocks_shard_1(TruncateMode mode) {
+  return mode == TruncateMode::RollbackParity ||
+         mode == TruncateMode::RollbackData ||
+         mode == TruncateMode::RollbackPrimary;
+}
+
 struct TruncateCase {
   std::string name;
   /* The objects of the case for k and stripe unit su, or nullopt if the case
@@ -4279,6 +4344,11 @@ struct TruncateCase {
   std::function<std::optional<std::vector<ObjectScenario>>(uint64_t k,
                                                            uint64_t su)> make;
 };
+
+// gtest prints the parameters of each test; without this byte by byte
+void PrintTo(const TruncateCase& truncate_case, std::ostream* os) {
+  *os << truncate_case.name;
+}
 
 constexpr uint64_t PAGE = EC_ALIGN_SIZE;
 
@@ -4603,56 +4673,56 @@ const std::vector<TruncateCase> kTruncateCases = make_truncate_cases();
 
 }  // namespace
 
+/* A batch of cases of a config, run in one mode on one cluster. */
 class TestECTruncateMatrix
   : public ECTruncateTestBase,
     public ::testing::WithParamInterface<
-      std::tuple<BackendConfig, TruncateCase, TruncateMode>> {
+      std::tuple<BackendConfig, TruncateMode, std::vector<TruncateCase>>> {
 public:
   TestECTruncateMatrix() : ECTruncateTestBase(std::get<0>(GetParam())) {}
 };
 
 TEST_P(TestECTruncateMatrix, Run) {
-  const auto& [config, truncate_case, mode] = GetParam();
-  const auto objects = truncate_case.make(k, stripe_unit);
-  if (!objects) {
-    GTEST_SKIP() << truncate_case.name << " does not apply to this geometry";
+  const auto& [config, mode, cases] = GetParam();
+  std::vector<TruncateRun> runs;
+  for (const auto& truncate_case : cases) {
+    auto objects = truncate_case.make(k, stripe_unit);
+    ASSERT_TRUE(objects) << truncate_case.name << " does not apply to this geometry";
+    if (blocks_shard_1(mode) && !ops_write_shard(*objects, 1)) {
+      continue;  // nothing to roll back
+    }
+    runs.push_back({truncate_case.name, std::move(*objects)});
   }
-  const bool blocks_shard_1 = mode == TruncateMode::RollbackParity ||
-                              mode == TruncateMode::RollbackData ||
-                              mode == TruncateMode::RollbackPrimary;
-  if (blocks_shard_1 && !ops_write_shard(*objects, 1)) {
-    GTEST_SKIP() << truncate_case.name << " does not write shard 1";
+  if (runs.empty()) {
+    GTEST_SKIP() << "no case writes shard 1";
   }
-  SCOPED_TRACE(config.label + " " + truncate_case.name);
+  SCOPED_TRACE(config.label);
 
   switch (mode) {
   case TruncateMode::Forward:
-    run_forward(truncate_case.name, *objects);
+    run_forward(runs);
     break;
   case TruncateMode::RollbackParity:
-    run_rollback(truncate_case.name, *objects, 1, get_shard(k + m - 1));
+    run_rollback(runs, 1, get_shard(k + m - 1));
     break;
   case TruncateMode::RollbackData:
-    if (k <= 2) {
-      GTEST_SKIP() << "needs a data shard other than the first two";
-    }
-    run_rollback(truncate_case.name, *objects, 1, get_shard(2));
+    ASSERT_GT(k, 2) << "needs a data shard other than the first two";
+    run_rollback(runs, 1, get_shard(2));
     break;
   case TruncateMode::RollbackPrimary:
-    run_rollback(truncate_case.name, *objects, 1,
-                 get_primary_shard_from_osdmap());
+    run_rollback(runs, 1, get_primary_shard_from_osdmap());
     break;
   case TruncateMode::BlockParityRollbackData:
-    run_rollback(truncate_case.name, *objects, get_shard(k),
-                 get_shard(k > 2 ? 2 : 1));
+    run_rollback(runs, get_shard(k), get_shard(k > 2 ? 2 : 1));
     break;
   case TruncateMode::BlockParityRollbackPrimary:
-    run_rollback(truncate_case.name, *objects, get_shard(k),
-                 get_primary_shard_from_osdmap());
+    run_rollback(runs, get_shard(k), get_primary_shard_from_osdmap());
     break;
   }
 }
 
+/* A single case keeps the name it had before cases were batched; a batch is
+ * named after its mode and first case. */
 std::string truncate_matrix_name(
     const ::testing::TestParamInfo<TestECTruncateMatrix::ParamType>& info) {
   static const std::map<TruncateMode, std::string> mode_names = {
@@ -4663,22 +4733,64 @@ std::string truncate_matrix_name(
     {TruncateMode::BlockParityRollbackData, "BlockParityRollbackData"},
     {TruncateMode::BlockParityRollbackPrimary, "BlockParityRollbackPrimary"},
   };
-  return std::get<0>(info.param).label + "_" + std::get<1>(info.param).name +
-         "_" + mode_names.at(std::get<2>(info.param));
+  const auto& [config, mode, cases] = info.param;
+  if (cases.size() == 1) {
+    return config.label + "_" + cases[0].name + "_" + mode_names.at(mode);
+  }
+  return config.label + "_" + mode_names.at(mode) + "_Batch_" + cases[0].name;
+}
+
+/* The cases that apply to each config, in batches of up to
+ * CEPH_TEST_TRUNCATE_BATCH (default 64; 1 runs each case alone) that share
+ * a cluster: its setup and teardown take 6 to 25 ms per test. In the modes
+ * that block shard 1, a case with more than one op in flight runs alone, as
+ * one of its ops may complete first, and would not behind an earlier case's
+ * op. In the other modes all ops complete, or none as every op writes the
+ * first parity shard. */
+std::vector<TestECTruncateMatrix::ParamType> truncate_matrix_params() {
+  size_t batch = 64;
+  if (const char* env = std::getenv("CEPH_TEST_TRUNCATE_BATCH")) {
+    batch = std::max<size_t>(1, std::strtoul(env, nullptr, 10));
+  }
+  std::vector<TestECTruncateMatrix::ParamType> params;
+  for (const auto& config : kECPeeringConfigs) {
+    for (const auto mode : kTruncateModes) {
+      if (mode == TruncateMode::RollbackData && config.k <= 2) {
+        continue;
+      }
+      std::vector<TruncateCase> together;
+      for (const auto& truncate_case : kTruncateCases) {
+        const auto objects = truncate_case.make(config.k, config.stripe_unit);
+        if (!objects) {
+          continue;
+        }
+        size_t in_flight = 0;
+        for (const auto& object : *objects) {
+          in_flight += object.ops.size();
+        }
+        if (blocks_shard_1(mode) && in_flight > 1) {
+          params.emplace_back(config, mode,
+                              std::vector<TruncateCase>{truncate_case});
+          continue;
+        }
+        together.push_back(truncate_case);
+        if (together.size() == batch) {
+          params.emplace_back(config, mode, std::move(together));
+          together.clear();
+        }
+      }
+      if (!together.empty()) {
+        params.emplace_back(config, mode, std::move(together));
+      }
+    }
+  }
+  return params;
 }
 
 INSTANTIATE_TEST_SUITE_P(
   ECConfigs,
   TestECTruncateMatrix,
-  ::testing::Combine(
-    ::testing::ValuesIn(kECPeeringConfigs),
-    ::testing::ValuesIn(kTruncateCases),
-    ::testing::Values(TruncateMode::Forward,
-                      TruncateMode::RollbackParity,
-                      TruncateMode::RollbackData,
-                      TruncateMode::RollbackPrimary,
-                      TruncateMode::BlockParityRollbackData,
-                      TruncateMode::BlockParityRollbackPrimary)),
+  ::testing::ValuesIn(truncate_matrix_params()),
   truncate_matrix_name
 );
 
