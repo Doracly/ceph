@@ -133,7 +133,6 @@ void PGBackendTestFixture::setup_ec_pool()
     auto osd_fixture = std::make_unique<OsdTestFixture>(i);
     osd_fixture->store = MockStore::create(g_ceph_context, i);
     ASSERT_TRUE(osd_fixture->store);
-    osd_fixture->data_dir = osd_fixture->store->get_data_dir();
     osd_fixture->lru = std::make_unique<ECExtentCache::LRU>(1024 * 1024 * 100);
     osd_fixtures[i] = std::move(osd_fixture);
   }
@@ -252,7 +251,6 @@ void PGBackendTestFixture::setup_replicated_pool()
     auto osd_fixture = std::make_unique<OsdTestFixture>(i);
     osd_fixture->store = MockStore::create(g_ceph_context, i);
     ASSERT_TRUE(osd_fixture->store);
-    osd_fixture->data_dir = osd_fixture->store->get_data_dir();
     osd_fixtures[i] = std::move(osd_fixture);
 
     auto* osd_fix = osd_fixtures[i].get();
