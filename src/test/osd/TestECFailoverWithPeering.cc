@@ -960,8 +960,7 @@ TEST_P(TestECFailoverWithPeering, AsyncRecoveryKeepsEachZoneAtMinSize) {
     GTEST_SKIP() << "requires num_zones == 2";
   }
   ScopedConfig cfg_async_recovery("osd_async_recovery_min_cost", "0");
-  const pg_pool_t *pool = osdmap->get_pg_pool(pool_id);
-  const int spare = k + m - pool->min_size;
+  const int spare = k + m - osdmap->get_pg_pool(pool_id)->min_size;
   ASSERT_GE(spare, 1);
   const std::vector<int> zone1 = zone_osds(1);
   const std::string data(stripe_unit * k, 'A');
@@ -982,7 +981,9 @@ TEST_P(TestECFailoverWithPeering, AsyncRecoveryKeepsEachZoneAtMinSize) {
     }
   }
   EXPECT_LE(async_in_zone1, spare);
-  EXPECT_EQ(0u, osdmap->num_acting_below_min_size(*pool, ps->get_acting()));
+  // the current map's pool: marking OSDs down and up freed the first map's
+  EXPECT_EQ(0u, osdmap->num_acting_below_min_size(
+                  *osdmap->get_pg_pool(pool_id), ps->get_acting()));
 }
 
 TEST_P(TestECFailoverWithPeering, OSDFailureWithPeering) {
